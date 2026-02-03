@@ -26,6 +26,8 @@ from ctypes_rgb_values import get_rgb_values
 from ctypes_window_info import get_window_infos
 from flatten_everything import flatten_everything, ProtectedTuple
 
+from playwright.sync_api import Page
+
 BlockInput = ctypes.windll.user32.BlockInput
 BlockInput.argtypes = [wintypes.BOOL]
 BlockInput.restype = wintypes.BOOL
@@ -968,12 +970,28 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.wintypes.LONG), ("y", ctypes.wintypes.LONG)]
 
 
-def get_cursor():
-    pos = POINT_()
-    user32.GetCursorPos(ctypes.byref(pos))
-    return pos.x, pos.y
+def get_cursor(page: Page):
 
-
+    result = page.evaluate(
+        """
+        () => {
+            if (!window._mouseTrackerInstalled) {
+                window._mouseTrackerInstalled = true;
+                window._lastMouseX = window.innerWidth / 2;
+                window._lastMouseY = window.innerHeight / 2;
+                document.addEventListener('mousemove', (e) => {
+                    window._lastMouseX = e.clientX;
+                    window._lastMouseY = e.clientY;
+                });
+            }
+            return {
+                x: window._lastMouseX || 0,
+                y: window._lastMouseY || 0
+            };
+        }
+        """
+    )
+    return (result["x"], result["y"])
 class INPUT(ctypes.Structure):
     class _INPUT(ctypes.Union):
         _fields_ = (("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT))
@@ -1127,6 +1145,26 @@ def _mouse_click(flags):
 
 def calculate_all_coords(ends):
     d0, d1 = np.diff(ends, axis=0)[0]
+    
+    # Handle no movement
+    if d0 == 0 and d1 == 0:
+        return ends
+    
+    # Handle only horizontal movement (d1 = 0)
+    if d1 == 0:
+        return np.c_[
+            np.arange(ends[0, 0], ends[1, 0] + np.sign(d0), np.sign(d0), dtype=np.int32),
+            np.full(abs(d0) + 1, ends[0, 1], dtype=np.int32)
+        ]
+    
+    # Handle only vertical movement (d0 = 0)
+    if d0 == 0:
+        return np.c_[
+            np.full(abs(d1) + 1, ends[0, 0], dtype=np.int32),
+            np.arange(ends[0, 1], ends[1, 1] + np.sign(d1), np.sign(d1), dtype=np.int32)
+        ]
+    
+    # Original logic for diagonal movements
     if np.abs(d0) > np.abs(d1):
         return np.c_[
             np.arange(
@@ -1165,6 +1203,7 @@ def add_random_n_places(a, n, low=-10, high=10):
 def natural_mouse_movement(
         x,
         y,
+        page: Page,
         min_variation=-2,
         max_variation=2,
         use_every=1,
@@ -1172,7 +1211,7 @@ def natural_mouse_movement(
         print_coords=True,
         percent=90,
 ):
-    nowx, nowy = get_cursor()
+    nowx, nowy = get_cursor(page)
     coordtomove = x, y
     futx, futy = coordtomove
     allco = np.array([[nowx, nowy], [futx, futy]])
@@ -1193,7 +1232,7 @@ def natural_mouse_movement(
         if print_coords:
             print(f"{x}         ", end="\r")
 
-        move(int(x[0]), int(x[1]))
+        page.mouse.move(int(x[0]), int(x[1]))
         time.sleep(uniform(*sleeptime))
 
 
@@ -1250,10 +1289,8 @@ def natural_mouse_movement_relative(
         time.sleep(uniform(*sleeptime))
 
 
-def left_click(delay=0.1):
-    _mouse_click(MOUSEEVENTF_LEFTDOWN)
-    time.sleep(delay)
-    _mouse_click(MOUSEEVENTF_LEFTUP)
+def left_click(x, y, page, delay=0.1):
+    page.mouse.click(x, y)
 
 
 def left_mouse_down():
@@ -1287,7 +1324,8 @@ def left_click_xy(x, y, delay=0.1):
 
 def left_click_xy_natural(
         x,
-        y,
+        y, 
+        page,
         delay=0.1,
         min_variation=-3,
         max_variation=3,
@@ -1299,6 +1337,7 @@ def left_click_xy_natural(
     natural_mouse_movement(
         x,
         y,
+        page,
         min_variation=min_variation,
         max_variation=max_variation,
         use_every=use_every,
@@ -1306,7 +1345,7 @@ def left_click_xy_natural(
         print_coords=print_coords,
         percent=percent,
     )
-    left_click(delay=delay)
+    left_click(x, y, page, delay=delay)
 
 
 def right_click(delay=0.1):
